@@ -283,4 +283,17 @@ mod tests {
             missing
         );
     }
+
+    #[test]
+    fn both_qwen_asr_models_advertise_handy_live_preview() {
+        let qwen_models: Vec<_> = CATALOG
+            .iter()
+            .filter(|model| model.caps.architecture.as_deref() == Some("qwen3_asr"))
+            .collect();
+
+        assert_eq!(qwen_models.len(), 2);
+        assert!(qwen_models
+            .iter()
+            .all(|model| model.caps.supports_streaming == Some(true)));
+    }
 }
