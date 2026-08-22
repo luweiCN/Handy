@@ -64,6 +64,10 @@
 - 三次请求只发给用户当前选择的同一 endpoint/model，不自动把私人文本扩散到第二家供应商。
 - 正常录音和历史重新后处理都必须使用现有 cancellation generation，确保用户取消后 drop 正在等待的 future。
 
+2026-08-22 的用户实际体验是：安装当前组合修改后，尚未再遇到后处理偶发持续几十秒的情况。这只能证明组合版本的体感改善，不能单独证明 shared client、connect timeout、reasoning 参数或 hedging 中哪一项的因果。从机制和延迟量级判断，几十秒尾延迟消失更可能主要来自 hedging；shared client 通常只节省 DNS/TCP/TLS 建连和连接池开销，3 秒 connect timeout 则主要约束建连故障。
+
+Hedging 是用户为“速度优先”明确选择的 fork-only 政策。它会必然增加上游请求、费用和服务端负载，因此不应默认放入 Handy 官方 PR，也不应与连接复用、provider 参数或历史 UI 混成一个提交。
+
 供应商关闭 thinking/reasoning 的字段并不统一。当前实现位于 `src-tauri/src/llm_client.rs`：
 
 - DashScope：`enable_thinking: false`
@@ -97,6 +101,19 @@
 | `f8593a5` | 被后续策略调整 | 引入 `t=0` 双发和 delayed third request；早期 3 秒/8 秒时序已被后续提交替换                                                              |
 | `1bfadc3` | 当前有效       | 第三发改为 5 秒；移除 chat response deadline；保留手动取消、3 秒 connect timeout 和 8 秒 metadata timeout                                |
 | `1881d5a` | 当前有效       | 历史记录从原始转录重新执行 LLM 后处理，含 UI、取消、数据更新、bindings 和 24 个 locale                                                   |
+
+### 3.1 上游贡献拆分策略
+
+上游当前处于 feature freeze，并明确要求一个 PR 只包含一个 fix 或 feature。本 fork 的长音频、LLM 和历史功能不得打包成一个官方 PR，应按以下边界处理：
+
+| 功能               | 上游策略                                                                                                                                                                                  |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Qwen 长音频切段    | 不重开已关闭的 Handy PR #1882。优先用真实 status 18 回归证据支持 `transcribe.cpp` #74 与 Handy #1633；待两个分支重新无冲突后，再用私密长音频做不输出正文的联合回归。                      |
+| Hedged requests    | 只留自用 fork；除非未来维护者主动接受一个默认关闭、有费用/隐私说明的独立设计，否则不提官方 PR。                                                                                           |
+| Shared HTTP client | 已从干净 `upstream/main` 提炼到 `perf/reuse-post-processing-http-client`：实现 `11663a5`，请求级认证回归测试 `6649ce7`。它只定位为连接池复用和 3 秒建连边界，不宣称解决几十秒生成尾延迟。 |
+| 历史重新后处理     | 先与 Discussion #826 / 已有 PR #851 的作者和维护者协调，说明本 fork 的无 migration/无版本历史最小子集。未获得方向前不创建竞争性 PR。                                                      |
+
+本地协调稿位于被 `.git/info/exclude` 排除的 `upstream-pr-drafts/`；它们不会进入产品 commit。官方 PR template 的 `Human Written Description` 必须由用户本人用 2–3 句自己的话填写，AI 只能留 TODO，不得代写或伪装成人工描述。
 
 ## 4. 合并冲突热点
 
