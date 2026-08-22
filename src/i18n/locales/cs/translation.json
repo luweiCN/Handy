@@ -449,6 +449,12 @@
       "retranscribe": "Přepsat znovu",
       "retranscribeError": "Opětovný přepis se nezdařil. Zkuste to prosím znovu.",
       "transcribing": "Přepisuji...",
+      "postProcessAgain": "Znovu následně zpracovat",
+      "cancelPostProcess": "Zrušit následné zpracování",
+      "postProcessing": "Probíhá následné zpracování...",
+      "postProcessError": "Následné zpracování selhalo. Zkuste to znovu.",
+      "postProcessedResult": "Výsledek následného zpracování",
+      "originalTranscription": "Původní přepis",
       "transcriptionFailed": "Přepis selhal. Můžete zkusit přepis znovu pomocí ikony opakování."
     },
     "debug": {

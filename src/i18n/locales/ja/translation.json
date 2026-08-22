@@ -449,6 +449,12 @@
       "retranscribe": "再文字起こし",
       "retranscribeError": "再文字起こしに失敗しました。もう一度お試しください。",
       "transcribing": "文字起こし中…",
+      "postProcessAgain": "再度後処理",
+      "cancelPostProcess": "後処理をキャンセル",
+      "postProcessing": "後処理中...",
+      "postProcessError": "後処理に失敗しました。もう一度お試しください。",
+      "postProcessedResult": "後処理結果",
+      "originalTranscription": "元の文字起こし",
       "transcriptionFailed": "文字起こしに失敗しました。リトライアイコンを使用して再文字起こしできます。"
     },
     "debug": {

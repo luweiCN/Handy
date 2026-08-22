@@ -449,6 +449,12 @@
       "retranscribe": "Opnieuw transcriberen",
       "retranscribeError": "Opnieuw transcriberen mislukt. Probeer het opnieuw.",
       "transcribing": "Transcriberen...",
+      "postProcessAgain": "Opnieuw nabewerken",
+      "cancelPostProcess": "Nabewerking annuleren",
+      "postProcessing": "Bezig met nabewerken...",
+      "postProcessError": "Nabewerking mislukt. Probeer het opnieuw.",
+      "postProcessedResult": "Nabewerkt resultaat",
+      "originalTranscription": "Oorspronkelijke transcriptie",
       "transcriptionFailed": "Transcriptie mislukt. Je kunt het opnieuw proberen via het herlaad-pictogram."
     },
     "debug": {

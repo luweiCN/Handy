@@ -449,6 +449,12 @@
       "retranscribe": "重新转录",
       "retranscribeError": "重新转录失败。请重试。",
       "transcribing": "转录中...",
+      "postProcessAgain": "重新后处理",
+      "cancelPostProcess": "取消后处理",
+      "postProcessing": "后处理中...",
+      "postProcessError": "后处理失败，请重试。",
+      "postProcessedResult": "后处理结果",
+      "originalTranscription": "原始转录",
       "transcriptionFailed": "转录失败。您可以使用重试图标重新转录。"
     },
     "debug": {

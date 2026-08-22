@@ -449,6 +449,12 @@
       "retranscribe": "Re-transcrire",
       "retranscribeError": "Impossible de re-transcrire. Veuillez réessayer.",
       "transcribing": "Transcription en cours...",
+      "postProcessAgain": "Retraiter à nouveau",
+      "cancelPostProcess": "Annuler le post-traitement",
+      "postProcessing": "Post-traitement en cours...",
+      "postProcessError": "Le post-traitement a échoué. Veuillez réessayer.",
+      "postProcessedResult": "Résultat post-traité",
+      "originalTranscription": "Transcription originale",
       "transcriptionFailed": "La transcription a échoué. Vous pouvez re-transcrire en utilisant l'icône de réessai."
     },
     "debug": {

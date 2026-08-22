@@ -449,6 +449,12 @@
       "retranscribe": "Yeniden transkribe et",
       "retranscribeError": "Yeniden transkripsiyon başarısız oldu. Lütfen tekrar deneyin.",
       "transcribing": "Transkribe ediliyor...",
+      "postProcessAgain": "Yeniden son işlem uygula",
+      "cancelPostProcess": "Son işlemi iptal et",
+      "postProcessing": "Son işlem uygulanıyor...",
+      "postProcessError": "Son işlem başarısız oldu. Lütfen tekrar deneyin.",
+      "postProcessedResult": "Son işlem sonucu",
+      "originalTranscription": "Orijinal transkripsiyon",
       "transcriptionFailed": "Transkripsiyon başarısız oldu. Yeniden deneme simgesini kullanarak tekrar transkribe edebilirsiniz."
     },
     "debug": {

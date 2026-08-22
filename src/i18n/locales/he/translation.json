@@ -449,6 +449,12 @@
       "retranscribe": "תמלל מחדש",
       "retranscribeError": "תמלול מחדש נכשל. נסה שוב.",
       "transcribing": "מתמלל...",
+      "postProcessAgain": "עיבוד נוסף מחדש",
+      "cancelPostProcess": "ביטול העיבוד הנוסף",
+      "postProcessing": "מתבצע עיבוד נוסף...",
+      "postProcessError": "העיבוד הנוסף נכשל. נא לנסות שוב.",
+      "postProcessedResult": "תוצאה לאחר עיבוד",
+      "originalTranscription": "תמלול מקורי",
       "transcriptionFailed": "התמלול נכשל. אפשר לתמלל מחדש באמצעות אייקון הניסיון החוזר."
     },
     "debug": {

@@ -1,5 +1,6 @@
-use crate::actions::process_transcription_output;
+use crate::actions::{complete_unless_cancelled, process_transcription_output};
 use crate::managers::{
+    audio::AudioRecordingManager,
     history::{HistoryManager, PaginatedHistory},
     transcription::TranscriptionManager,
 };
@@ -102,6 +103,47 @@ pub async fn retry_history_entry_transcription(
             processed.post_processed_text,
             processed.post_process_prompt,
         )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn retry_history_entry_post_process(
+    app: AppHandle,
+    history_manager: State<'_, Arc<HistoryManager>>,
+    audio_manager: State<'_, Arc<AudioRecordingManager>>,
+    id: i64,
+) -> Result<(), String> {
+    let cancel_generation = audio_manager.cancel_generation();
+    let entry = history_manager
+        .get_entry_by_id(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("History entry {} not found", id))?;
+
+    if entry.transcription_text.trim().is_empty() {
+        return Err("History entry has no transcription to post-process".to_string());
+    }
+
+    let processed = complete_unless_cancelled(
+        process_transcription_output(&app, &entry.transcription_text, true),
+        || audio_manager.was_cancelled_since(cancel_generation),
+    )
+    .await;
+
+    let Some(processed) = processed else {
+        return Ok(());
+    };
+    let Some(post_processed_text) = processed
+        .post_processed_text
+        .filter(|text| !text.trim().is_empty())
+    else {
+        return Err("Post-processing did not return a result".to_string());
+    };
+
+    history_manager
+        .update_post_processing(id, post_processed_text, processed.post_process_prompt)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }

@@ -449,6 +449,12 @@
       "retranscribe": "Phiên âm lại",
       "retranscribeError": "Không thể phiên âm lại. Vui lòng thử lại.",
       "transcribing": "Đang phiên âm...",
+      "postProcessAgain": "Hậu xử lý lại",
+      "cancelPostProcess": "Hủy hậu xử lý",
+      "postProcessing": "Đang hậu xử lý...",
+      "postProcessError": "Hậu xử lý thất bại. Vui lòng thử lại.",
+      "postProcessedResult": "Kết quả đã hậu xử lý",
+      "originalTranscription": "Bản phiên âm gốc",
       "transcriptionFailed": "Phiên âm thất bại. Bạn có thể phiên âm lại bằng biểu tượng thử lại."
     },
     "debug": {

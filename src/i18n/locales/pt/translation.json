@@ -449,6 +449,12 @@
       "retranscribe": "Re-transcrever",
       "retranscribeError": "Falha ao re-transcrever. Por favor, tente novamente.",
       "transcribing": "Transcrevendo...",
+      "postProcessAgain": "Pós-processar novamente",
+      "cancelPostProcess": "Cancelar pós-processamento",
+      "postProcessing": "Pós-processando...",
+      "postProcessError": "Falha no pós-processamento. Tente novamente.",
+      "postProcessedResult": "Resultado pós-processado",
+      "originalTranscription": "Transcrição original",
       "transcriptionFailed": "A transcrição falhou. Você pode re-transcrever usando o ícone de tentar novamente."
     },
     "debug": {

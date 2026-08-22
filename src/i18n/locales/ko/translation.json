@@ -449,6 +449,12 @@
       "retranscribe": "다시 전사",
       "retranscribeError": "다시 전사에 실패했습니다. 다시 시도해주세요.",
       "transcribing": "전사 중...",
+      "postProcessAgain": "다시 후처리",
+      "cancelPostProcess": "후처리 취소",
+      "postProcessing": "후처리 중...",
+      "postProcessError": "후처리에 실패했습니다. 다시 시도해 주세요.",
+      "postProcessedResult": "후처리 결과",
+      "originalTranscription": "원본 전사",
       "transcriptionFailed": "전사에 실패했습니다. 재시도 아이콘을 사용하여 다시 전사할 수 있습니다."
     },
     "debug": {

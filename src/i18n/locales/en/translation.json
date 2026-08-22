@@ -449,6 +449,12 @@
       "retranscribe": "Re-transcribe",
       "retranscribeError": "Failed to re-transcribe. Please try again.",
       "transcribing": "Transcribing...",
+      "postProcessAgain": "Post-process again",
+      "cancelPostProcess": "Cancel post-processing",
+      "postProcessing": "Post-processing...",
+      "postProcessError": "Failed to post-process. Please try again.",
+      "postProcessedResult": "Post-processed result",
+      "originalTranscription": "Original transcription",
       "transcriptionFailed": "Transcription failed. You can re-transcribe using the retry icon."
     },
     "debug": {

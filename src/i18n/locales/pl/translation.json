@@ -449,6 +449,12 @@
       "retranscribe": "Transkrybuj ponownie",
       "retranscribeError": "Nie udało się ponownie transkrybować. Spróbuj ponownie.",
       "transcribing": "Transkrybuję...",
+      "postProcessAgain": "Przetwórz ponownie",
+      "cancelPostProcess": "Anuluj przetwarzanie końcowe",
+      "postProcessing": "Trwa przetwarzanie końcowe...",
+      "postProcessError": "Przetwarzanie końcowe nie powiodło się. Spróbuj ponownie.",
+      "postProcessedResult": "Wynik po przetworzeniu",
+      "originalTranscription": "Oryginalna transkrypcja",
       "transcriptionFailed": "Transkrypcja nie powiodła się. Możesz transkrybować ponownie za pomocą ikony ponowienia."
     },
     "debug": {

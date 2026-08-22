@@ -449,6 +449,12 @@
       "retranscribe": "Ri-trascrivere",
       "retranscribeError": "Impossibile ri-trascrivere. Riprova.",
       "transcribing": "Trascrizione in corso...",
+      "postProcessAgain": "Ripeti la post-elaborazione",
+      "cancelPostProcess": "Annulla la post-elaborazione",
+      "postProcessing": "Post-elaborazione in corso...",
+      "postProcessError": "Post-elaborazione non riuscita. Riprova.",
+      "postProcessedResult": "Risultato post-elaborato",
+      "originalTranscription": "Trascrizione originale",
       "transcriptionFailed": "Trascrizione fallita. Puoi ri-trascrivere usando l'icona di ripetizione."
     },
     "debug": {

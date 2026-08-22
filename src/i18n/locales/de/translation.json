@@ -449,6 +449,12 @@
       "retranscribe": "Erneut transkribieren",
       "retranscribeError": "Erneute Transkription fehlgeschlagen. Bitte versuche es erneut.",
       "transcribing": "Transkribiere...",
+      "postProcessAgain": "Erneut nachbearbeiten",
+      "cancelPostProcess": "Nachbearbeitung abbrechen",
+      "postProcessing": "Nachbearbeitung läuft...",
+      "postProcessError": "Nachbearbeitung fehlgeschlagen. Bitte erneut versuchen.",
+      "postProcessedResult": "Nachbearbeitetes Ergebnis",
+      "originalTranscription": "Ursprüngliche Transkription",
       "transcriptionFailed": "Transkription fehlgeschlagen. Du kannst über das Wiederholen-Symbol erneut transkribieren."
     },
     "debug": {

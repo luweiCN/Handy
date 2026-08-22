@@ -426,6 +426,12 @@
       "retranscribe": "إعادة النسخ",
       "retranscribeError": "فشلت إعادة النسخ. يرجى المحاولة مرة أخرى.",
       "transcribing": "جارٍ النسخ...",
+      "postProcessAgain": "إعادة المعالجة اللاحقة",
+      "cancelPostProcess": "إلغاء المعالجة اللاحقة",
+      "postProcessing": "جارٍ إجراء المعالجة اللاحقة...",
+      "postProcessError": "فشلت المعالجة اللاحقة. يُرجى المحاولة مرة أخرى.",
+      "postProcessedResult": "نتيجة المعالجة اللاحقة",
+      "originalTranscription": "النص الأصلي",
       "transcriptionFailed": "فشل النسخ. يمكنك إعادة النسخ باستخدام أيقونة إعادة المحاولة."
     },
     "debug": {

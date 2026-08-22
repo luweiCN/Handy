@@ -1,7 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { Check, Copy, FolderOpen, RotateCcw, Star, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  FolderOpen,
+  RotateCcw,
+  Sparkles,
+  Star,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -20,11 +29,17 @@ const IconButton: React.FC<{
   title: string;
   disabled?: boolean;
   active?: boolean;
+  pressed?: boolean;
+  busy?: boolean;
   children: React.ReactNode;
-}> = ({ onClick, title, disabled, active, children }) => (
+}> = ({ onClick, title, disabled, active, pressed, busy, children }) => (
   <button
+    type="button"
     onClick={onClick}
     disabled={disabled}
+    aria-label={title}
+    aria-busy={busy}
+    aria-pressed={pressed}
     className={`p-1.5 rounded-md flex items-center justify-center transition-colors cursor-pointer disabled:cursor-not-allowed disabled:text-text/20 ${
       active
         ? "text-logo-primary hover:text-logo-primary/80"
@@ -54,7 +69,7 @@ const OpenRecordingsButton: React.FC<OpenRecordingsButtonProps> = ({
     className="flex items-center gap-2"
     title={label}
   >
-    <FolderOpen className="w-4 h-4" />
+    <FolderOpen className="w-4 h-4" aria-hidden="true" />
     <span>{label}</span>
   </Button>
 );
@@ -65,14 +80,28 @@ export const HistorySettings: React.FC = () => {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
+  const [postProcessingId, setPostProcessingId] = useState<number | null>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const entriesRef = useRef<HistoryEntry[]>([]);
   const loadingRef = useRef(false);
+  const postProcessingIdRef = useRef<number | null>(null);
 
   // Keep ref in sync for use in IntersectionObserver callback
   useEffect(() => {
     entriesRef.current = entries;
   }, [entries]);
+
+  useEffect(
+    () => () => {
+      if (postProcessingIdRef.current !== null) {
+        postProcessingIdRef.current = null;
+        void commands.cancelOperation().catch((error) => {
+          console.error("Failed to cancel history post-processing:", error);
+        });
+      }
+    },
+    [],
+  );
 
   const loadPage = useCallback(async (cursor?: number) => {
     const isFirstPage = cursor === undefined;
@@ -223,6 +252,37 @@ export const HistorySettings: React.FC = () => {
     }
   };
 
+  const postProcessHistoryEntry = async (id: number) => {
+    if (postProcessingIdRef.current !== null) {
+      return;
+    }
+
+    postProcessingIdRef.current = id;
+    setPostProcessingId(id);
+    try {
+      const result = await commands.retryHistoryEntryPostProcess(id);
+      if (result.status !== "ok") {
+        throw new Error(String(result.error));
+      }
+    } catch (error) {
+      console.error("Failed to post-process history entry:", error);
+      toast.error(t("settings.history.postProcessError"));
+    } finally {
+      if (postProcessingIdRef.current === id) {
+        postProcessingIdRef.current = null;
+        setPostProcessingId(null);
+      }
+    }
+  };
+
+  const cancelHistoryPostProcess = async () => {
+    try {
+      await commands.cancelOperation();
+    } catch (error) {
+      console.error("Failed to cancel history post-processing:", error);
+    }
+  };
+
   const openRecordingsFolder = async () => {
     try {
       const result = await commands.openRecordingsFolder();
@@ -258,10 +318,22 @@ export const HistorySettings: React.FC = () => {
                 key={entry.id}
                 entry={entry}
                 onToggleSaved={() => toggleSaved(entry.id)}
-                onCopyText={() => copyToClipboard(entry.transcription_text)}
+                onCopyText={() =>
+                  copyToClipboard(
+                    entry.post_processed_text?.trim()
+                      ? entry.post_processed_text
+                      : entry.transcription_text,
+                  )
+                }
                 getAudioUrl={getAudioUrl}
                 deleteAudio={deleteAudioEntry}
                 retryTranscription={retryHistoryEntry}
+                retryPostProcess={postProcessHistoryEntry}
+                cancelPostProcess={cancelHistoryPostProcess}
+                isPostProcessing={postProcessingId === entry.id}
+                isPostProcessingBlocked={
+                  postProcessingId !== null && postProcessingId !== entry.id
+                }
               />
             ))}
           </div>
@@ -301,6 +373,10 @@ interface HistoryEntryProps {
   getAudioUrl: (fileName: string) => Promise<string | null>;
   deleteAudio: (id: number) => Promise<void>;
   retryTranscription: (id: number) => Promise<void>;
+  retryPostProcess: (id: number) => Promise<void>;
+  cancelPostProcess: () => Promise<void>;
+  isPostProcessing: boolean;
+  isPostProcessingBlocked: boolean;
 }
 
 const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
@@ -310,12 +386,20 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   getAudioUrl,
   deleteAudio,
   retryTranscription,
+  retryPostProcess,
+  cancelPostProcess,
+  isPostProcessing,
+  isPostProcessingBlocked,
 }) => {
   const { t, i18n } = useTranslation();
   const [showCopied, setShowCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
 
   const hasTranscription = entry.transcription_text.trim().length > 0;
+  const hasPostProcessedText = Boolean(entry.post_processed_text?.trim());
+  const displayedText = hasPostProcessedText
+    ? entry.post_processed_text
+    : entry.transcription_text;
 
   const handleLoadAudio = useCallback(
     () => getAudioUrl(entry.file_name),
@@ -353,6 +437,15 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
     }
   };
 
+  const handlePostProcess = async () => {
+    if (isPostProcessing) {
+      await cancelPostProcess();
+      return;
+    }
+
+    await retryPostProcess(entry.id);
+  };
+
   const formattedDate = formatDateTime(String(entry.timestamp), i18n.language);
 
   return (
@@ -362,19 +455,20 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
         <div className="flex items-center">
           <IconButton
             onClick={handleCopyText}
-            disabled={!hasTranscription || retrying}
+            disabled={!hasTranscription || retrying || isPostProcessing}
             title={t("settings.history.copyToClipboard")}
           >
             {showCopied ? (
-              <Check width={16} height={16} />
+              <Check width={16} height={16} aria-hidden="true" />
             ) : (
-              <Copy width={16} height={16} />
+              <Copy width={16} height={16} aria-hidden="true" />
             )}
           </IconButton>
           <IconButton
             onClick={onToggleSaved}
-            disabled={retrying}
+            disabled={retrying || isPostProcessing}
             active={entry.saved}
+            pressed={entry.saved}
             title={
               entry.saved
                 ? t("settings.history.unsave")
@@ -385,11 +479,12 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
               width={16}
               height={16}
               fill={entry.saved ? "currentColor" : "none"}
+              aria-hidden="true"
             />
           </IconButton>
           <IconButton
             onClick={handleRetranscribe}
-            disabled={retrying}
+            disabled={retrying || isPostProcessing}
             title={t("settings.history.retranscribe")}
           >
             <RotateCcw
@@ -400,17 +495,53 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
                   ? { animation: "spin 1s linear infinite reverse" }
                   : undefined
               }
+              aria-hidden="true"
             />
           </IconButton>
           <IconButton
+            onClick={handlePostProcess}
+            disabled={!hasTranscription || retrying || isPostProcessingBlocked}
+            active={isPostProcessing}
+            busy={isPostProcessing}
+            title={
+              isPostProcessing
+                ? t("settings.history.cancelPostProcess")
+                : t("settings.history.postProcessAgain")
+            }
+          >
+            {isPostProcessing ? (
+              <X width={16} height={16} aria-hidden="true" />
+            ) : (
+              <Sparkles width={16} height={16} aria-hidden="true" />
+            )}
+          </IconButton>
+          <IconButton
             onClick={handleDeleteEntry}
-            disabled={retrying}
+            disabled={retrying || isPostProcessing}
             title={t("settings.history.delete")}
           >
-            <Trash2 width={16} height={16} />
+            <Trash2 width={16} height={16} aria-hidden="true" />
           </IconButton>
         </div>
       </div>
+
+      {isPostProcessing ? (
+        <p
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-1.5 text-xs font-medium text-logo-primary"
+        >
+          <Sparkles width={14} height={14} aria-hidden="true" />
+          {t("settings.history.postProcessing")}
+        </p>
+      ) : null}
+
+      {hasPostProcessedText && !retrying ? (
+        <p className="flex items-center gap-1.5 text-xs font-medium text-logo-primary">
+          <Sparkles width={14} height={14} aria-hidden="true" />
+          {t("settings.history.postProcessedResult")}
+        </p>
+      ) : null}
 
       <p
         className={`italic text-sm pb-2 ${
@@ -437,9 +568,20 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
         {retrying
           ? t("settings.history.transcribing")
           : hasTranscription
-            ? entry.transcription_text
+            ? displayedText
             : t("settings.history.transcriptionFailed")}
       </p>
+
+      {hasPostProcessedText && !retrying ? (
+        <details className="text-xs text-text/60">
+          <summary className="w-fit cursor-pointer rounded-sm hover:text-text focus-visible:outline focus-visible:outline-1 focus-visible:outline-logo-primary">
+            {t("settings.history.originalTranscription")}
+          </summary>
+          <p className="pt-2 text-sm italic text-text/70 whitespace-pre-wrap break-words select-text">
+            {entry.transcription_text}
+          </p>
+        </details>
+      ) : null}
 
       <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
     </div>
