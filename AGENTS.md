@@ -2,6 +2,12 @@
 
 This file provides guidance to AI coding assistants working with code in this repository.
 
+## Custom Fork Maintenance (Required)
+
+This checkout is a user-maintained fork. Before any request to "sync code", update from upstream, merge `upstream/main`, build or install the custom app, or change the custom long-dictation/LLM/history behavior, read [`CUSTOM_FORK_MAINTENANCE.md`](CUSTOM_FORK_MAINTENANCE.md) in full.
+
+For a short request such as “同步代码” or “sync the code,” treat that guide as the source of truth: preserve its Section 2 product invariants and follow its upstream-merge, verification, release, installation, rollback, privacy, and reporting requirements. If the worktree is not clean or the guide conflicts with current code, stop and explain the discrepancy instead of silently overwriting work.
+
 ## Development Commands
 
 **Prerequisites:**
