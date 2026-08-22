@@ -622,9 +622,19 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 4096];
-            let bytes_read = stream.read(&mut request).await.unwrap();
-            let _ = request_tx.send(String::from_utf8_lossy(&request[..bytes_read]).into_owned());
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let bytes_read = stream.read(&mut chunk).await.unwrap();
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
             stream.write_all(response.as_bytes()).await.unwrap();
         });
 
