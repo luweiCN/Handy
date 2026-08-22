@@ -5,7 +5,7 @@ use crate::audio_toolkit::{
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::{EngineType, ModelManager};
 use crate::settings::{
-    get_settings, AppSettings, ModelUnloadTimeout, OrtAcceleratorSetting, OverlayStyle,
+    get_settings, AppSettings, ModelUnloadTimeout, OrtAcceleratorSetting,
     TranscribeAcceleratorSetting,
 };
 use anyhow::Result;
@@ -42,12 +42,6 @@ const QWEN_LONG_AUDIO_TARGET_SAMPLES: usize = 25 * 16_000;
 const QWEN_LONG_AUDIO_MAX_SAMPLES: usize = 30 * 16_000;
 const QWEN_SILENCE_WINDOW_SAMPLES: usize = 16_000 / 10;
 const QWEN_SILENCE_SCAN_STEP_SAMPLES: usize = 16_000 / 100;
-const QWEN_LIVE_PREVIEW_INTERVAL_SAMPLES: usize = 2 * 16_000;
-const QWEN_LIVE_PREVIEW_WINDOW_SAMPLES: usize = 8 * 16_000;
-
-fn supports_live_preview(architecture: &str, supports_native_streaming: bool) -> bool {
-    supports_native_streaming || architecture == "qwen3_asr"
-}
 
 fn should_chunk_qwen_audio(is_qwen3_asr: bool, audio_len: usize) -> bool {
     is_qwen3_asr && audio_len > QWEN_LONG_AUDIO_MAX_SAMPLES
@@ -202,95 +196,6 @@ struct FinalizedStreamText {
     output_language: OutputLanguageEvidence,
     /// The streaming model's supported languages, for text-based detection.
     supported_languages: Vec<String>,
-}
-
-enum QwenLivePreviewExit {
-    Finalize(mpsc::Sender<Option<FinalizedStreamText>>),
-    Cancelled,
-    Disconnected,
-}
-
-/// Produce bounded rolling previews for Qwen's local GGUF backend.
-///
-/// This is deliberately not a substitute for Qwen's native stateful streaming
-/// implementation (currently vLLM-only). Each preview re-runs at most eight
-/// seconds of audio; the caller returns the engine before telling finalize to
-/// fall back to the full batch path, which remains the source of final text.
-fn run_qwen_live_preview_loop<F, E>(
-    rx: mpsc::Receiver<StreamCmd>,
-    mut decode: F,
-    mut emit: E,
-) -> QwenLivePreviewExit
-where
-    F: FnMut(&[f32]) -> Result<String>,
-    E: FnMut(&str, &str),
-{
-    let mut window_audio = Vec::new();
-    let mut samples_at_last_decode = 0;
-    let mut committed = String::new();
-
-    while let Ok(command) = rx.recv() {
-        match command {
-            StreamCmd::Feed(pcm) => {
-                let mut offset = 0;
-                while offset < pcm.len() {
-                    let samples_since_decode =
-                        window_audio.len().saturating_sub(samples_at_last_decode);
-                    let samples_until_decode = QWEN_LIVE_PREVIEW_INTERVAL_SAMPLES
-                        .saturating_sub(samples_since_decode)
-                        .max(1);
-                    let samples_until_window =
-                        QWEN_LIVE_PREVIEW_WINDOW_SAMPLES - window_audio.len();
-                    let take = (pcm.len() - offset)
-                        .min(samples_until_decode)
-                        .min(samples_until_window);
-                    window_audio.extend_from_slice(&pcm[offset..offset + take]);
-                    offset += take;
-
-                    if window_audio.len().saturating_sub(samples_at_last_decode)
-                        < QWEN_LIVE_PREVIEW_INTERVAL_SAMPLES
-                        && window_audio.len() < QWEN_LIVE_PREVIEW_WINDOW_SAMPLES
-                    {
-                        continue;
-                    }
-
-                    samples_at_last_decode = window_audio.len();
-                    let window_complete = window_audio.len() == QWEN_LIVE_PREVIEW_WINDOW_SAMPLES;
-                    match decode(&window_audio) {
-                        Ok(text) => {
-                            let text = text.trim();
-                            if window_complete {
-                                if !text.is_empty() {
-                                    if !committed.is_empty() {
-                                        committed.push(' ');
-                                    }
-                                    committed.push_str(text);
-                                }
-                                emit(&committed, "");
-                            } else {
-                                emit(&committed, text);
-                            }
-                        }
-                        Err(error) => {
-                            warn!("Qwen live preview decode failed: {error}");
-                            if window_complete {
-                                emit(&committed, "");
-                            }
-                        }
-                    }
-
-                    if window_complete {
-                        window_audio.clear();
-                        samples_at_last_decode = 0;
-                    }
-                }
-            }
-            StreamCmd::Finalize(reply) => return QwenLivePreviewExit::Finalize(reply),
-            StreamCmd::Cancel => return QwenLivePreviewExit::Cancelled,
-        }
-    }
-
-    QwenLivePreviewExit::Disconnected
 }
 
 /// Routes real-time audio frames to the active streaming worker. Shared between
@@ -780,11 +685,9 @@ impl TranscriptionManager {
                 // reflect runtime truth, not the pre-download probe. The
                 // load-completed event below triggers the frontend refresh.
                 let caps = session.model().capabilities();
-                let supports_preview =
-                    supports_live_preview(&session.model().arch(), caps.supports_streaming);
                 self.model_manager.set_runtime_capabilities(
                     model_id,
-                    supports_preview,
+                    caps.supports_streaming,
                     caps.supports_translate,
                     caps.supports_language_detect,
                     caps.languages.clone(),
@@ -795,7 +698,7 @@ impl TranscriptionManager {
                     .unwrap_or_else(|_| "unknown".to_string());
                 info!(
                     "Loaded whisper model '{}' (requested {:?}, requested device '{}', \
-                     bound backend '{}', bound device '{}', supports_streaming={}, supports_preview={}, \
+                     bound backend '{}', bound device '{}', supports_streaming={}, \
                      supports_translate={}, supports_language_detect={})",
                     model_id,
                     backend,
@@ -803,7 +706,6 @@ impl TranscriptionManager {
                     bound_backend,
                     bound_device,
                     caps.supports_streaming,
-                    supports_preview,
                     caps.supports_translate,
                     caps.supports_language_detect
                 );
@@ -1058,11 +960,10 @@ impl TranscriptionManager {
             }
         };
 
-        // Native streaming comes from transcribe-cpp. Qwen's local GGUF backend
-        // has no stream hooks, but Handy can still provide bounded rolling
-        // previews while leaving final text to the batch path.
-        let (supports_native_streaming, is_qwen3_asr, supports_translate, languages) = match &engine
-        {
+        // Only transcribe-cpp models expose streaming; ONNX engines fall back to
+        // batch. The loaded session (not the ModelManager copy) is the source of
+        // truth for run-path capabilities.
+        let (supports_streaming, supports_translate, languages) = match &engine {
             LoadedEngine::TranscribeCpp(session) => {
                 let model = session.model();
                 let caps = model.capabilities();
@@ -1078,7 +979,6 @@ impl TranscriptionManager {
                 );
                 (
                     caps.supports_streaming,
-                    model.arch() == "qwen3_asr",
                     caps.supports_translate,
                     caps.languages,
                 )
@@ -1089,14 +989,11 @@ impl TranscriptionManager {
                      streaming is unavailable, using batch transcription",
                     model_id
                 );
-                (false, false, false, Vec::new())
+                (false, false, Vec::new())
             }
         };
 
-        if !supports_live_preview(
-            if is_qwen3_asr { "qwen3_asr" } else { "" },
-            supports_native_streaming,
-        ) {
+        if !supports_streaming {
             self.return_engine(engine, &model_id);
             self.router.clear();
             drain_until_finalize(rx);
@@ -1126,58 +1023,6 @@ impl TranscriptionManager {
             target_language: run_plan.target_language,
             ..Default::default()
         };
-
-        if is_qwen3_asr && !supports_native_streaming {
-            // Rolling previews are only useful when the live text panel is
-            // visible. Minimal/hidden overlays retain the normal batch-only
-            // path and avoid spending compute on text nobody can see.
-            if settings.overlay_style != OverlayStyle::Live {
-                self.return_engine(engine, &model_id);
-                self.router.clear();
-                drain_until_finalize(rx);
-                return;
-            }
-
-            let session = match &mut engine {
-                LoadedEngine::TranscribeCpp(session) => session,
-                _ => {
-                    error!("Qwen live preview lost its transcribe-cpp session");
-                    self.return_engine(engine, &model_id);
-                    self.router.clear();
-                    drain_until_finalize(rx);
-                    return;
-                }
-            };
-            let backend = session.model().backend().to_string();
-            self.stream_active.store(true, Ordering::Release);
-            self.touch_activity();
-            info!(
-                "Qwen rolling live preview started (model '{}', backend '{}', interval=2s, window=8s)",
-                model_id, backend
-            );
-
-            let preview_exit = run_qwen_live_preview_loop(
-                rx,
-                |pcm| {
-                    self.touch_activity();
-                    session
-                        .run(pcm, &run_options)
-                        .map(|transcription| transcription.text)
-                        .map_err(|error| anyhow::anyhow!("transcribe-cpp preview failed: {error}"))
-                },
-                |committed, tentative| self.emit_stream_text(committed, tentative),
-            );
-
-            // The final transcript deliberately uses the regular batch path.
-            // Return the engine before replying so the caller can acquire it
-            // immediately without racing this worker's lease.
-            self.return_engine(engine, &model_id);
-            self.router.clear();
-            if let QwenLivePreviewExit::Finalize(reply) = preview_exit {
-                let _ = reply.send(None);
-            }
-            return;
-        }
 
         // Run the stream on the held session. The Stream borrows the session
         // (and thus the engine) for its lifetime, so the feed/finalize loop
@@ -2497,93 +2342,6 @@ mod tests {
         assert!(should_chunk_qwen_audio(true, 31 * 16_000));
         assert!(!should_chunk_qwen_audio(true, 30 * 16_000));
         assert!(!should_chunk_qwen_audio(false, 95 * 16_000));
-    }
-
-    #[test]
-    fn qwen_live_preview_decodes_every_two_seconds_and_bounds_each_window() {
-        let (tx, rx) = mpsc::channel();
-        for seconds in [1, 1, 2, 2, 2, 2] {
-            tx.send(StreamCmd::Feed(vec![0.25; seconds * 16_000]))
-                .unwrap();
-        }
-        tx.send(StreamCmd::Cancel).unwrap();
-
-        let mut decoded_lengths = Vec::new();
-        let mut emitted = Vec::new();
-        let exit = run_qwen_live_preview_loop(
-            rx,
-            |audio| {
-                decoded_lengths.push(audio.len());
-                Ok(format!("preview-{}", decoded_lengths.len()))
-            },
-            |committed, tentative| emitted.push((committed.to_string(), tentative.to_string())),
-        );
-
-        assert!(matches!(exit, QwenLivePreviewExit::Cancelled));
-        assert_eq!(
-            decoded_lengths,
-            [2, 4, 6, 8, 2].map(|seconds| seconds * 16_000)
-        );
-        assert_eq!(
-            emitted,
-            vec![
-                (String::new(), "preview-1".to_string()),
-                (String::new(), "preview-2".to_string()),
-                (String::new(), "preview-3".to_string()),
-                ("preview-4".to_string(), String::new()),
-                ("preview-4".to_string(), "preview-5".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn qwen_live_preview_finalize_defers_batch_until_engine_is_returned() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(StreamCmd::Feed(vec![0.25; 2 * 16_000])).unwrap();
-        let (reply_tx, reply_rx) = mpsc::channel();
-        tx.send(StreamCmd::Finalize(reply_tx)).unwrap();
-
-        let exit = run_qwen_live_preview_loop(rx, |_| Ok("preview".to_string()), |_, _| {});
-
-        let QwenLivePreviewExit::Finalize(reply) = exit else {
-            panic!("expected finalize exit");
-        };
-        assert!(reply_rx.try_recv().is_err());
-        reply.send(None).unwrap();
-        assert!(reply_rx.recv().unwrap().is_none());
-    }
-
-    #[test]
-    fn qwen_live_preview_drops_failed_window_to_keep_compute_bounded() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(StreamCmd::Feed(vec![0.25; 10 * 16_000])).unwrap();
-        tx.send(StreamCmd::Cancel).unwrap();
-
-        let mut decoded_lengths = Vec::new();
-        let exit = run_qwen_live_preview_loop(
-            rx,
-            |audio| {
-                decoded_lengths.push(audio.len());
-                if audio.len() == 8 * 16_000 {
-                    anyhow::bail!("simulated preview failure");
-                }
-                Ok("preview".to_string())
-            },
-            |_, _| {},
-        );
-
-        assert!(matches!(exit, QwenLivePreviewExit::Cancelled));
-        assert_eq!(
-            decoded_lengths,
-            [2, 4, 6, 8, 2].map(|seconds| seconds * 16_000)
-        );
-    }
-
-    #[test]
-    fn qwen_models_get_live_preview_without_claiming_native_stream_hooks() {
-        assert!(supports_live_preview("qwen3_asr", false));
-        assert!(supports_live_preview("parakeet", true));
-        assert!(!supports_live_preview("whisper", false));
     }
 
     #[test]

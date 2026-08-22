@@ -283,7 +283,7 @@
       "language_count": 30,
       "languages": ["zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el", "ro", "hu", "mk"],
       "capabilities": {
-        "streaming": true,
+        "streaming": false,
         "translate": false,
         "lang_detect": true,
         "timestamps": "none"
@@ -1723,7 +1723,7 @@
       "language_count": 30,
       "languages": ["zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko", "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cs", "fil", "fa", "el", "ro", "hu", "mk"],
       "capabilities": {
-        "streaming": true,
+        "streaming": false,
         "translate": false,
         "lang_detect": true,
         "timestamps": "none"
