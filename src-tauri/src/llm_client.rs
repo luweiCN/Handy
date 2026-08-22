@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 
 const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const LLM_METADATA_TIMEOUT: Duration = Duration::from_secs(8);
 // Tail-latency policy for remote post-processing: two requests start together;
-// a third starts only if neither has produced usable text after three seconds.
-// All attempts share LLM_REQUEST_TIMEOUT. Cancelling losers is best-effort and
-// does not guarantee that the provider stops computing or billing them.
-const LLM_HEDGE_DELAY: Duration = Duration::from_secs(3);
+// a third starts only if neither has produced usable text after five seconds.
+// There is no response deadline; the caller may cancel the pending future.
+// Cancelling losers is best-effort and does not guarantee that the provider
+// stops computing or billing them.
+const LLM_HEDGE_DELAY: Duration = Duration::from_secs(5);
 const LLM_EAGER_ATTEMPTS: usize = 2;
 
 #[derive(Debug, Serialize)]
@@ -239,7 +240,6 @@ fn shared_http_client() -> Result<&'static reqwest::Client, String> {
     match CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(LLM_CONNECT_TIMEOUT)
-            .timeout(LLM_REQUEST_TIMEOUT)
             .build()
             .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))
     }) {
@@ -394,9 +394,9 @@ pub async fn send_chat_completion(
 /// one retry without the fields, and the rejection is remembered per
 /// (base_url, model) so later requests skip the failing attempt entirely.
 ///
-/// Remote requests use the bounded hedging policy above. The first non-empty
+/// Remote requests use the hedging policy above. The first non-empty
 /// successful response wins; errors and empty responses leave other attempts
-/// running until one succeeds or the single total timeout expires.
+/// running until one succeeds, every attempt finishes, or the caller cancels.
 pub async fn send_chat_completion_with_schema(
     provider: &PostProcessProvider,
     api_key: String,
@@ -406,7 +406,7 @@ pub async fn send_chat_completion_with_schema(
     json_schema: Option<Value>,
     disable_reasoning: bool,
 ) -> Result<Option<String>, String> {
-    send_chat_completion_with_schema_timeout(
+    send_chat_completion_with_schema_and_hedge(
         provider,
         api_key,
         model,
@@ -414,38 +414,13 @@ pub async fn send_chat_completion_with_schema(
         system_prompt,
         json_schema,
         disable_reasoning,
-        LLM_REQUEST_TIMEOUT,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn send_chat_completion_with_schema_timeout(
-    provider: &PostProcessProvider,
-    api_key: String,
-    model: &str,
-    user_content: String,
-    system_prompt: Option<String>,
-    json_schema: Option<Value>,
-    disable_reasoning: bool,
-    timeout: Duration,
-) -> Result<Option<String>, String> {
-    send_chat_completion_with_schema_timeout_and_hedge(
-        provider,
-        api_key,
-        model,
-        user_content,
-        system_prompt,
-        json_schema,
-        disable_reasoning,
-        timeout,
         LLM_HEDGE_DELAY,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_chat_completion_with_schema_timeout_and_hedge(
+async fn send_chat_completion_with_schema_and_hedge(
     provider: &PostProcessProvider,
     api_key: String,
     model: &str,
@@ -453,13 +428,8 @@ async fn send_chat_completion_with_schema_timeout_and_hedge(
     system_prompt: Option<String>,
     json_schema: Option<Value>,
     disable_reasoning: bool,
-    timeout: Duration,
     hedge_delay: Duration,
 ) -> Result<Option<String>, String> {
-    let endpoint = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
     let attempt = ChatCompletionAttempt {
         provider: provider.clone(),
         api_key,
@@ -469,18 +439,7 @@ async fn send_chat_completion_with_schema_timeout_and_hedge(
         json_schema,
         disable_reasoning,
     };
-    match tokio::time::timeout(timeout, run_hedged_chat_completion(attempt, hedge_delay)).await {
-        Ok(result) => result,
-        Err(_) => {
-            let details = format!(
-                "LLM request timed out after {}ms for {}",
-                timeout.as_millis(),
-                sanitized_url_for_log(&endpoint)
-            );
-            error!("{details}");
-            Err(details)
-        }
-    }
+    run_hedged_chat_completion(attempt, hedge_delay).await
 }
 
 fn spawn_chat_completion_attempt(
@@ -709,6 +668,7 @@ pub async fn fetch_models(
     let response = client
         .get(&url)
         .headers(headers)
+        .timeout(LLM_METADATA_TIMEOUT)
         .send()
         .await
         .map_err(|e| report_reqwest_error("Failed to fetch models", &e))?;
@@ -1011,23 +971,32 @@ mod tests {
         assert!(std::ptr::eq(first, second));
     }
 
-    #[tokio::test]
-    async fn chat_completion_respects_one_total_timeout_budget() {
-        let base_url = serve_delayed_chat_response(std::time::Duration::from_millis(250)).await;
-        let result = send_chat_completion_with_schema_timeout(
-            &provider("custom", &base_url),
-            String::new(),
-            "test-model",
-            "hi".to_string(),
-            None,
-            None,
-            true,
-            std::time::Duration::from_millis(50),
-        )
-        .await;
+    #[test]
+    fn production_hedge_delay_is_five_seconds() {
+        assert_eq!(LLM_HEDGE_DELAY, std::time::Duration::from_secs(5));
+    }
 
-        let error = result.unwrap_err();
-        assert!(error.contains("timed out after 50ms"), "{error}");
+    #[tokio::test]
+    async fn chat_completion_waits_for_slow_success_without_request_deadline() {
+        let base_url = serve_delayed_chat_response(std::time::Duration::from_millis(150)).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            send_chat_completion_with_schema_and_hedge(
+                &provider("custom", &base_url),
+                String::new(),
+                "test-model",
+                "hi".to_string(),
+                None,
+                None,
+                true,
+                std::time::Duration::from_millis(250),
+            ),
+        )
+        .await
+        .expect("the local server should eventually answer")
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("ok"));
     }
 
     #[tokio::test]
@@ -1040,7 +1009,7 @@ mod tests {
         ])
         .await;
 
-        let result = send_chat_completion_with_schema_timeout_and_hedge(
+        let result = send_chat_completion_with_schema_and_hedge(
             &provider("custom", &base_url),
             String::new(),
             "test-model",
@@ -1048,7 +1017,6 @@ mod tests {
             None,
             None,
             false,
-            std::time::Duration::from_millis(300),
             std::time::Duration::from_millis(100),
         )
         .await
@@ -1074,7 +1042,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let hedge_delay = std::time::Duration::from_millis(50);
 
-        let result = send_chat_completion_with_schema_timeout_and_hedge(
+        let result = send_chat_completion_with_schema_and_hedge(
             &provider("custom", &base_url),
             String::new(),
             "test-model",
@@ -1082,7 +1050,6 @@ mod tests {
             None,
             None,
             false,
-            std::time::Duration::from_millis(300),
             hedge_delay,
         )
         .await
@@ -1108,7 +1075,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let hedge_delay = std::time::Duration::from_millis(100);
 
-        let result = send_chat_completion_with_schema_timeout_and_hedge(
+        let result = send_chat_completion_with_schema_and_hedge(
             &provider("custom", &base_url),
             String::new(),
             "test-model",
@@ -1116,7 +1083,6 @@ mod tests {
             None,
             None,
             false,
-            std::time::Duration::from_millis(300),
             hedge_delay,
         )
         .await
