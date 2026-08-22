@@ -609,6 +609,28 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn serve_one_captured_chat_response() -> (String, tokio::sync::oneshot::Receiver<String>)
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream.read(&mut request).await.unwrap();
+            let _ = request_tx.send(String::from_utf8_lossy(&request[..bytes_read]).into_owned());
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        (format!("http://{address}"), request_rx)
+    }
+
     #[test]
     fn error_source_chain_includes_all_nested_causes() {
         let error = TestError {
@@ -724,6 +746,39 @@ mod tests {
         let second = shared_http_client().unwrap();
 
         assert!(std::ptr::eq(first, second));
+    }
+
+    #[tokio::test]
+    async fn shared_client_keeps_auth_headers_request_scoped() {
+        let (custom_url, custom_request) = serve_one_captured_chat_response().await;
+        send_chat_completion(
+            &provider("custom", &custom_url),
+            "first-test-key".to_string(),
+            "test-model",
+            "hi".to_string(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let custom_headers = custom_request.await.unwrap().to_ascii_lowercase();
+        assert!(custom_headers.contains("authorization: bearer first-test-key"));
+        assert!(!custom_headers.contains("x-api-key:"));
+
+        let (anthropic_url, anthropic_request) = serve_one_captured_chat_response().await;
+        send_chat_completion(
+            &provider("anthropic", &anthropic_url),
+            "second-test-key".to_string(),
+            "test-model",
+            "hi".to_string(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let anthropic_headers = anthropic_request.await.unwrap().to_ascii_lowercase();
+        assert!(anthropic_headers.contains("x-api-key: second-test-key"));
+        assert!(!anthropic_headers.contains("authorization:"));
     }
 
     #[test]
