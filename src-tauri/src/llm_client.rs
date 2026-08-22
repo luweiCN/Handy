@@ -6,10 +6,17 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::task::JoinSet;
 
 const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+// Tail-latency policy for remote post-processing: two requests start together;
+// a third starts only if neither has produced usable text after three seconds.
+// All attempts share LLM_REQUEST_TIMEOUT. Cancelling losers is best-effort and
+// does not guarantee that the provider stops computing or billing them.
+const LLM_HEDGE_DELAY: Duration = Duration::from_secs(3);
+const LLM_EAGER_ATTEMPTS: usize = 2;
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
@@ -151,6 +158,41 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatMessageResponse {
     content: Option<String>,
+}
+
+#[derive(Clone)]
+struct ChatCompletionAttempt {
+    provider: PostProcessProvider,
+    api_key: String,
+    model: String,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+    disable_reasoning: bool,
+}
+
+impl ChatCompletionAttempt {
+    async fn run(self) -> Result<Option<String>, String> {
+        let Self {
+            provider,
+            api_key,
+            model,
+            user_content,
+            system_prompt,
+            json_schema,
+            disable_reasoning,
+        } = self;
+        send_chat_completion_with_schema_inner(
+            &provider,
+            api_key,
+            &model,
+            user_content,
+            system_prompt,
+            json_schema,
+            disable_reasoning,
+        )
+        .await
+    }
 }
 
 /// Build headers for API requests based on provider type
@@ -351,6 +393,10 @@ pub async fn send_chat_completion(
 /// upstreams reject with 400), so a 400/422 answer to such a request triggers
 /// one retry without the fields, and the rejection is remembered per
 /// (base_url, model) so later requests skip the failing attempt entirely.
+///
+/// Remote requests use the bounded hedging policy above. The first non-empty
+/// successful response wins; errors and empty responses leave other attempts
+/// running until one succeeds or the single total timeout expires.
 pub async fn send_chat_completion_with_schema(
     provider: &PostProcessProvider,
     api_key: String,
@@ -384,24 +430,46 @@ async fn send_chat_completion_with_schema_timeout(
     disable_reasoning: bool,
     timeout: Duration,
 ) -> Result<Option<String>, String> {
+    send_chat_completion_with_schema_timeout_and_hedge(
+        provider,
+        api_key,
+        model,
+        user_content,
+        system_prompt,
+        json_schema,
+        disable_reasoning,
+        timeout,
+        LLM_HEDGE_DELAY,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_chat_completion_with_schema_timeout_and_hedge(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+    disable_reasoning: bool,
+    timeout: Duration,
+    hedge_delay: Duration,
+) -> Result<Option<String>, String> {
     let endpoint = format!(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    match tokio::time::timeout(
-        timeout,
-        send_chat_completion_with_schema_inner(
-            provider,
-            api_key,
-            model,
-            user_content,
-            system_prompt,
-            json_schema,
-            disable_reasoning,
-        ),
-    )
-    .await
-    {
+    let attempt = ChatCompletionAttempt {
+        provider: provider.clone(),
+        api_key,
+        model: model.to_string(),
+        user_content,
+        system_prompt,
+        json_schema,
+        disable_reasoning,
+    };
+    match tokio::time::timeout(timeout, run_hedged_chat_completion(attempt, hedge_delay)).await {
         Ok(result) => result,
         Err(_) => {
             let details = format!(
@@ -411,6 +479,76 @@ async fn send_chat_completion_with_schema_timeout(
             );
             error!("{details}");
             Err(details)
+        }
+    }
+}
+
+fn spawn_chat_completion_attempt(
+    attempts: &mut JoinSet<(usize, Result<Option<String>, String>)>,
+    attempt_id: usize,
+    attempt: ChatCompletionAttempt,
+) {
+    debug!("Starting LLM hedge attempt {attempt_id}");
+    attempts.spawn(async move { (attempt_id, attempt.run().await) });
+}
+
+async fn run_hedged_chat_completion(
+    attempt: ChatCompletionAttempt,
+    hedge_delay: Duration,
+) -> Result<Option<String>, String> {
+    let started = Instant::now();
+    let mut attempts = JoinSet::new();
+    for attempt_id in 1..=LLM_EAGER_ATTEMPTS {
+        spawn_chat_completion_attempt(&mut attempts, attempt_id, attempt.clone());
+    }
+
+    let delayed_attempt = tokio::time::sleep(hedge_delay);
+    tokio::pin!(delayed_attempt);
+    let mut delayed_started = false;
+    let mut last_error = None;
+
+    loop {
+        if attempts.is_empty() && delayed_started {
+            return match last_error {
+                Some(error) => Err(error),
+                None => Ok(None),
+            };
+        }
+
+        tokio::select! {
+            joined = attempts.join_next(), if !attempts.is_empty() => {
+                match joined {
+                    Some(Ok((attempt_id, Ok(Some(content))))) if !content.trim().is_empty() => {
+                        info!(
+                            "LLM hedge attempt {attempt_id} won after {}ms",
+                            started.elapsed().as_millis()
+                        );
+                        attempts.abort_all();
+                        return Ok(Some(content));
+                    }
+                    Some(Ok((attempt_id, Ok(_)))) => {
+                        debug!("LLM hedge attempt {attempt_id} returned no usable content");
+                    }
+                    Some(Ok((attempt_id, Err(error)))) => {
+                        debug!("LLM hedge attempt {attempt_id} failed");
+                        last_error = Some(error);
+                    }
+                    Some(Err(error)) => {
+                        let details = format!("LLM hedge attempt task failed: {error}");
+                        error!("{details}");
+                        last_error = Some(details);
+                    }
+                    None => {}
+                }
+            }
+            _ = &mut delayed_attempt, if !delayed_started => {
+                delayed_started = true;
+                debug!(
+                    "No successful LLM hedge result after {}ms; starting delayed attempt 3",
+                    hedge_delay.as_millis()
+                );
+                spawn_chat_completion_attempt(&mut attempts, 3, attempt.clone());
+            }
         }
     }
 }
@@ -711,6 +849,37 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn serve_planned_chat_responses(
+        plans: Vec<(std::time::Duration, &'static str, &'static str)>,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<tokio::time::Instant>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            for (delay, status, body) in plans {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = accepted_tx.send(tokio::time::Instant::now());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 4096];
+                    let _ = stream.read(&mut request).await;
+                    tokio::time::sleep(delay).await;
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+
+        (format!("http://{address}"), accepted_rx)
+    }
+
     #[test]
     fn error_source_chain_includes_all_nested_causes() {
         let error = TestError {
@@ -859,6 +1028,105 @@ mod tests {
 
         let error = result.unwrap_err();
         assert!(error.contains("timed out after 50ms"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn hedge_starts_two_requests_immediately_and_uses_the_fastest_valid_result() {
+        let slow = r#"{"choices":[{"message":{"content":"slow"}}]}"#;
+        let fast = r#"{"choices":[{"message":{"content":"fast"}}]}"#;
+        let (base_url, mut accepted) = serve_planned_chat_responses(vec![
+            (std::time::Duration::from_millis(150), "200 OK", slow),
+            (std::time::Duration::from_millis(5), "200 OK", fast),
+        ])
+        .await;
+
+        let result = send_chat_completion_with_schema_timeout_and_hedge(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            false,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("fast"));
+        let first = accepted.recv().await.unwrap();
+        let second = accepted.recv().await.unwrap();
+        assert!(second.duration_since(first) < std::time::Duration::from_millis(40));
+    }
+
+    #[tokio::test]
+    async fn hedge_starts_a_third_request_only_after_the_delay() {
+        let slow_a = r#"{"choices":[{"message":{"content":"slow-a"}}]}"#;
+        let slow_b = r#"{"choices":[{"message":{"content":"slow-b"}}]}"#;
+        let third = r#"{"choices":[{"message":{"content":"third"}}]}"#;
+        let (base_url, mut accepted) = serve_planned_chat_responses(vec![
+            (std::time::Duration::from_millis(200), "200 OK", slow_a),
+            (std::time::Duration::from_millis(200), "200 OK", slow_b),
+            (std::time::Duration::ZERO, "200 OK", third),
+        ])
+        .await;
+        let started = tokio::time::Instant::now();
+        let hedge_delay = std::time::Duration::from_millis(50);
+
+        let result = send_chat_completion_with_schema_timeout_and_hedge(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            false,
+            std::time::Duration::from_millis(300),
+            hedge_delay,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("third"));
+        let _ = accepted.recv().await.unwrap();
+        let _ = accepted.recv().await.unwrap();
+        let third_started = accepted.recv().await.unwrap();
+        assert!(third_started.duration_since(started) >= hedge_delay);
+    }
+
+    #[tokio::test]
+    async fn hedge_ignores_errors_and_empty_responses_until_a_valid_result_arrives() {
+        let empty = r#"{"choices":[]}"#;
+        let valid = r#"{"choices":[{"message":{"content":"valid"}}]}"#;
+        let (base_url, mut accepted) = serve_planned_chat_responses(vec![
+            (std::time::Duration::ZERO, "500 Server Error", "failed"),
+            (std::time::Duration::ZERO, "200 OK", empty),
+            (std::time::Duration::ZERO, "200 OK", valid),
+        ])
+        .await;
+        let started = tokio::time::Instant::now();
+        let hedge_delay = std::time::Duration::from_millis(100);
+
+        let result = send_chat_completion_with_schema_timeout_and_hedge(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            false,
+            std::time::Duration::from_millis(300),
+            hedge_delay,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("valid"));
+        let _ = accepted.recv().await.unwrap();
+        let _ = accepted.recv().await.unwrap();
+        let third_started = accepted.recv().await.unwrap();
+        assert!(third_started.duration_since(started) >= hedge_delay);
     }
 
     #[test]
