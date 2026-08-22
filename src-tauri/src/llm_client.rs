@@ -6,6 +6,9 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
@@ -172,13 +175,18 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     Ok(headers)
 }
 
-/// Create an HTTP client with provider-specific headers
-fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwest::Client, String> {
-    let headers = build_headers(provider, api_key)?;
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))
+/// Reuse one connection pool while keeping credentials scoped to each request.
+fn shared_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(LLM_CONNECT_TIMEOUT)
+            .build()
+            .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))
+    }) {
+        Ok(client) => Ok(client),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 /// Format a bounded error source chain.
@@ -343,7 +351,8 @@ pub async fn send_chat_completion_with_schema(
         sanitized_url_for_log(&url)
     );
 
-    let client = create_client(provider, &api_key)?;
+    let client = shared_http_client()?;
+    let headers = build_headers(provider, &api_key)?;
 
     // Build messages vector
     let mut messages = Vec::new();
@@ -389,6 +398,7 @@ pub async fn send_chat_completion_with_schema(
 
     let mut response = client
         .post(&url)
+        .headers(headers.clone())
         .json(&request_body)
         .send()
         .await
@@ -418,6 +428,7 @@ pub async fn send_chat_completion_with_schema(
         request_body.reasoning = ReasoningParams::default();
         response = client
             .post(&url)
+            .headers(headers)
             .json(&request_body)
             .send()
             .await
@@ -472,10 +483,12 @@ pub async fn fetch_models(
 
     debug!("Fetching models from: {}", sanitized_url_for_log(&url));
 
-    let client = create_client(provider, &api_key)?;
+    let client = shared_http_client()?;
+    let headers = build_headers(provider, &api_key)?;
 
     let response = client
         .get(&url)
+        .headers(headers)
         .send()
         .await
         .map_err(|e| report_reqwest_error("Failed to fetch models", &e))?;
@@ -703,6 +716,14 @@ mod tests {
         assert!(json.get("reasoning_effort").is_none());
         assert!(json.get("reasoning").is_none());
         assert_eq!(json["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn http_client_is_reused_between_requests() {
+        let first = shared_http_client().unwrap();
+        let second = shared_http_client().unwrap();
+
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]
