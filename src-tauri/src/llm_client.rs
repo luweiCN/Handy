@@ -6,6 +6,10 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
@@ -46,11 +50,16 @@ struct ReasoningParams {
     reasoning: Option<ReasoningConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
 }
 
 impl ReasoningParams {
     fn is_empty(&self) -> bool {
-        self.reasoning_effort.is_none() && self.reasoning.is_none() && self.thinking.is_none()
+        self.reasoning_effort.is_none()
+            && self.reasoning.is_none()
+            && self.thinking.is_none()
+            && self.enable_thinking.is_none()
     }
 }
 
@@ -59,7 +68,16 @@ impl ReasoningParams {
 /// the request is retried without it (see `send_chat_completion_with_schema`).
 fn reasoning_disable_params(provider: &PostProcessProvider) -> ReasoningParams {
     let base_url = provider.base_url.to_lowercase();
-    if base_url.contains("api.deepseek.com") {
+    if base_url.contains("dashscope.aliyuncs.com")
+        || base_url.contains("dashscope-intl.aliyuncs.com")
+    {
+        // Alibaba Model Studio's OpenAI-compatible API controls hybrid
+        // thinking models with this top-level field.
+        ReasoningParams {
+            enable_thinking: Some(false),
+            ..Default::default()
+        }
+    } else if base_url.contains("api.deepseek.com") {
         // DeepSeek rejects reasoning_effort "none" and uses its own field:
         // https://api-docs.deepseek.com/guides/thinking_mode
         ReasoningParams {
@@ -172,13 +190,20 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     Ok(headers)
 }
 
-/// Create an HTTP client with provider-specific headers
-fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwest::Client, String> {
-    let headers = build_headers(provider, api_key)?;
-    reqwest::Client::builder()
-        .default_headers(headers)
-        .build()
-        .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))
+/// Reuse one connection pool across dictations. Authentication stays on each
+/// request so switching providers or API keys cannot leak credentials.
+fn shared_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    match CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(LLM_CONNECT_TIMEOUT)
+            .timeout(LLM_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| report_reqwest_error("Failed to build HTTP client", &e))
+    }) {
+        Ok(client) => Ok(client),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 /// Format a bounded error source chain.
@@ -335,6 +360,71 @@ pub async fn send_chat_completion_with_schema(
     json_schema: Option<Value>,
     disable_reasoning: bool,
 ) -> Result<Option<String>, String> {
+    send_chat_completion_with_schema_timeout(
+        provider,
+        api_key,
+        model,
+        user_content,
+        system_prompt,
+        json_schema,
+        disable_reasoning,
+        LLM_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_chat_completion_with_schema_timeout(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+    disable_reasoning: bool,
+    timeout: Duration,
+) -> Result<Option<String>, String> {
+    let endpoint = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    match tokio::time::timeout(
+        timeout,
+        send_chat_completion_with_schema_inner(
+            provider,
+            api_key,
+            model,
+            user_content,
+            system_prompt,
+            json_schema,
+            disable_reasoning,
+        ),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            let details = format!(
+                "LLM request timed out after {}ms for {}",
+                timeout.as_millis(),
+                sanitized_url_for_log(&endpoint)
+            );
+            error!("{details}");
+            Err(details)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_chat_completion_with_schema_inner(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+    disable_reasoning: bool,
+) -> Result<Option<String>, String> {
     let base_url = provider.base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base_url);
 
@@ -343,7 +433,8 @@ pub async fn send_chat_completion_with_schema(
         sanitized_url_for_log(&url)
     );
 
-    let client = create_client(provider, &api_key)?;
+    let client = shared_http_client()?;
+    let headers = build_headers(provider, &api_key)?;
 
     // Build messages vector
     let mut messages = Vec::new();
@@ -389,6 +480,7 @@ pub async fn send_chat_completion_with_schema(
 
     let mut response = client
         .post(&url)
+        .headers(headers.clone())
         .json(&request_body)
         .send()
         .await
@@ -418,6 +510,7 @@ pub async fn send_chat_completion_with_schema(
         request_body.reasoning = ReasoningParams::default();
         response = client
             .post(&url)
+            .headers(headers)
             .json(&request_body)
             .send()
             .await
@@ -472,10 +565,12 @@ pub async fn fetch_models(
 
     debug!("Fetching models from: {}", sanitized_url_for_log(&url));
 
-    let client = create_client(provider, &api_key)?;
+    let client = shared_http_client()?;
+    let headers = build_headers(provider, &api_key)?;
 
     let response = client
         .get(&url)
+        .headers(headers)
         .send()
         .await
         .map_err(|e| report_reqwest_error("Failed to fetch models", &e))?;
@@ -596,6 +691,26 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn serve_delayed_chat_response(delay: std::time::Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            tokio::time::sleep(delay).await;
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        format!("http://{address}")
+    }
+
     #[test]
     fn error_source_chain_includes_all_nested_causes() {
         let error = TestError {
@@ -674,6 +789,7 @@ mod tests {
         assert!(json.get("reasoning_effort").is_none());
         assert!(json.get("reasoning").is_none());
         assert!(json.get("thinking").is_none());
+        assert!(json.get("enable_thinking").is_none());
     }
 
     #[test]
@@ -703,6 +819,46 @@ mod tests {
         assert!(json.get("reasoning_effort").is_none());
         assert!(json.get("reasoning").is_none());
         assert_eq!(json["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn dashscope_base_url_uses_enable_thinking_false() {
+        let params = reasoning_disable_params(&provider(
+            "custom",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ));
+        let json = request_json(params);
+        assert!(json.get("reasoning_effort").is_none());
+        assert!(json.get("reasoning").is_none());
+        assert!(json.get("thinking").is_none());
+        assert_eq!(json["enable_thinking"], false);
+    }
+
+    #[test]
+    fn http_client_is_reused_between_requests() {
+        let first = shared_http_client().unwrap();
+        let second = shared_http_client().unwrap();
+
+        assert!(std::ptr::eq(first, second));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_respects_one_total_timeout_budget() {
+        let base_url = serve_delayed_chat_response(std::time::Duration::from_millis(250)).await;
+        let result = send_chat_completion_with_schema_timeout(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            true,
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        let error = result.unwrap_err();
+        assert!(error.contains("timed out after 50ms"), "{error}");
     }
 
     #[test]
