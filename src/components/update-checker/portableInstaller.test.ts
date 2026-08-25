@@ -6,6 +6,11 @@ import {
   PORTABLE_RELEASES_URL,
 } from "./portableInstaller";
 
+assert.equal(
+  PORTABLE_RELEASES_URL,
+  "https://github.com/luweiCN/Handy/releases/latest",
+);
+
 const X64_SETUP =
   "https://github.com/cjpais/Handy/releases/download/v0.9.5/Handy_0.9.5_x64-setup.exe";
 const ARM64_SETUP =

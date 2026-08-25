@@ -1,0 +1,94 @@
+name: "Release Custom macOS"
+
+on: workflow_dispatch
+
+concurrency:
+  group: custom-macos-release
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    if: github.repository == 'luweiCN/Handy'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.create-release.outputs.result }}
+      version: ${{ steps.release-inputs.outputs.version }}
+    steps:
+      - name: Checkout product branch
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate release inputs
+        id: release-inputs
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF_NAME" != "feature/long-dictation-stable-postprocess" ]]; then
+            echo "Custom releases must run from feature/long-dictation-stable-postprocess" >&2
+            exit 1
+          fi
+
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+
+          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
+          package_version="$(jq -r '.version' package.json)"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+
+          if [[ "$tauri_version" != "$package_version" || "$tauri_version" != "$cargo_version" ]]; then
+            echo "Version mismatch: tauri=$tauri_version package=$package_version cargo=$cargo_version" >&2
+            exit 1
+          fi
+
+          if [[ ! "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$ ]]; then
+            echo "Custom release version must match X.Y.Z-fork.N" >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/v${tauri_version}" >/dev/null 2>&1; then
+            echo "Release tag v${tauri_version} already exists" >&2
+            exit 1
+          fi
+
+          echo "version=$tauri_version" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        id: create-release
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${{ steps.release-inputs.outputs.version }}`,
+              name: `v${{ steps.release-inputs.outputs.version }}`,
+              target_commitish: context.sha,
+              draft: true,
+              prerelease: false,
+              generate_release_notes: true
+            })
+            return data.id
+
+  build-macos-arm64:
+    permissions:
+      contents: write
+    needs: create-release
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: "macos-26"
+      target: "aarch64-apple-darwin"
+      build-args: "--target aarch64-apple-darwin"
+      sign-binaries: false
+      sign-updates: true
+      asset-prefix: "handy-fork"
+      upload-artifacts: false
+      release-id: ${{ needs.create-release.outputs.release-id }}
+      no-cache: true
+    secrets: inherit
