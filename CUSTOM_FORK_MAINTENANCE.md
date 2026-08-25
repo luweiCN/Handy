@@ -341,6 +341,24 @@ shasum -a 256 src-tauri/target/release/bundle/dmg/*.dmg
 
 这些 hash 只用于识别 2026-08-25 的本地构建。下一次合并或 CI 重建后 hash 变化是正常的，必须记录对应产物的新值，而不是要求继续匹配旧值。
 
+2026-08-25 `v0.9.7-fork.3` 正式发布与独立身份安装记录：
+
+| 项目                   | 版本 / SHA-256 / 位置                                                                                                               |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| 产品 commit            | `e5deb27cd23836fa9052ed8ea927d6a915094e58`                                                                                          |
+| fork release           | `https://github.com/luweiCN/Handy/releases/tag/v0.9.7-fork.3`                                                                       |
+| CI DMG                 | `03339006782db848ed47b648e8ad27640db3c151d7774d8d06981c6debedbea5`                                                                  |
+| CI updater archive     | `d1391f1d60e3f57c6f9f0ad20c2f3bf984e09adb2e7ccb72ae624f3ebb2d1ec1`                                                                  |
+| CI updater `.sig`      | `33da0c8434b6c9d761bdf1c0a8349e4ed63cbd718bf834a9ae66d6b8e9bdae55`                                                                  |
+| CI `latest.json`       | `2dcd4e4e86a69da4850f4e5ad3cc3e801a648c7c59a30701c980f51718776a7d`                                                                  |
+| installed fork binary  | `defdf7c2dd5ab50bf2d0251b718d5bec0d41bccef0dd6e74da075b8f836c225a` / `/Applications/Handy Fork.app`                                 |
+| installed official app | `v0.9.6` / `com.pais.handy` / binary `19ea48ca62e7c1b1656efaf6ba276e8be66e87c68f83ece162c0b616db529f79` / `/Applications/Handy.app` |
+| old fork rollback      | `/Users/luwei/Applications/Handy Backups/20260825-160008/Handy.app`                                                                 |
+| private data backup    | `/Users/luwei/Applications/Handy Backups/20260825-160008/Application Support/com.pais.handy`                                        |
+| migrated fork data     | `/Users/luwei/Library/Application Support/com.luweicn.handyfork`                                                                    |
+
+CI asset digests、`latest.json` 版本/URL/签名、arm64 bundle identity、ad-hoc codesign 和 DMG checksum 均已核对。旧数据目录完整保留给官方身份，新目录由一次性完整复制创建；两边从此独立演进。首次运行新 bundle 仍需用户手动处理 macOS Accessibility/麦克风授权。
+
 ## 9. 提交、推送与维护记录
 
 所有验证和安装检查通过后：
