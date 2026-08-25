@@ -439,15 +439,16 @@ fn load_tray_icon(resolved_icon_path: tauri::Result<PathBuf>) -> tauri::Result<I
     Image::from_path(&resolved_icon_path).map(Image::to_owned)
 }
 
-pub fn tray_tooltip() -> String {
-    version_label()
+pub fn tray_tooltip(app: &AppHandle) -> String {
+    version_label(app)
 }
 
-fn version_label() -> String {
+fn version_label(app: &AppHandle) -> String {
+    let app_name = &app.package_info().name;
     if cfg!(debug_assertions) {
-        format!("Handy v{} (Dev)", env!("CARGO_PKG_VERSION"))
+        format!("{} v{} (Dev)", app_name, env!("CARGO_PKG_VERSION"))
     } else {
-        format!("Handy v{}", env!("CARGO_PKG_VERSION"))
+        format!("{} v{}", app_name, env!("CARGO_PKG_VERSION"))
     }
 }
 
@@ -484,7 +485,7 @@ fn build_menu(app: &AppHandle, inputs: &MenuInputs) -> tauri::Result<(Menu<tauri
     let (settings_accelerator, quit_accelerator) = (Some("Ctrl+,"), Some("Ctrl+Q"));
 
     // Create common menu items
-    let version_label = version_label();
+    let version_label = version_label(app);
     let version_i = MenuItem::with_id(app, "version", &version_label, false, None::<&str>)?;
     let settings_i = MenuItem::with_id(
         app,

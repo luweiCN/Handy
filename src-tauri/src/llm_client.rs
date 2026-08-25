@@ -1,4 +1,4 @@
-use crate::settings::PostProcessProvider;
+use crate::settings::{PostProcessProvider, DEFAULT_POST_PROCESS_HEDGE_DELAY_SECONDS};
 use log::{debug, error, info};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -11,13 +11,60 @@ use tokio::task::JoinSet;
 
 const LLM_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LLM_METADATA_TIMEOUT: Duration = Duration::from_secs(8);
-// Tail-latency policy for remote post-processing: two requests start together;
-// a third starts only if neither has produced usable text after five seconds.
-// There is no response deadline; the caller may cancel the pending future.
-// Cancelling losers is best-effort and does not guarantee that the provider
-// stops computing or billing them.
-const LLM_HEDGE_DELAY: Duration = Duration::from_secs(5);
-const LLM_EAGER_ATTEMPTS: usize = 2;
+// The default tail-latency policy starts two requests together, then one more
+// after five seconds without usable text. Settings can independently disable
+// either acceleration step. There is no response deadline; the caller may
+// cancel the pending future. Cancelling losers is best-effort and does not
+// guarantee that the provider stops computing or billing them.
+
+/// Request fan-out and delayed-backup policy for one remote post-processing call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HedgePolicy {
+    parallel_requests_enabled: bool,
+    delayed_request_enabled: bool,
+    delay: Duration,
+}
+
+impl HedgePolicy {
+    /// Create a policy from the user's current post-processing settings.
+    pub fn new(
+        parallel_requests_enabled: bool,
+        delayed_request_enabled: bool,
+        delay: Duration,
+    ) -> Self {
+        Self {
+            parallel_requests_enabled,
+            delayed_request_enabled,
+            delay,
+        }
+    }
+
+    fn eager_attempts(self) -> usize {
+        if self.parallel_requests_enabled {
+            2
+        } else {
+            1
+        }
+    }
+
+    fn delayed_request_enabled(self) -> bool {
+        self.delayed_request_enabled
+    }
+
+    fn delay(self) -> Duration {
+        self.delay
+    }
+}
+
+impl Default for HedgePolicy {
+    fn default() -> Self {
+        Self::new(
+            true,
+            true,
+            Duration::from_secs(DEFAULT_POST_PROCESS_HEDGE_DELAY_SECONDS),
+        )
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
@@ -204,13 +251,13 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         REFERER,
-        HeaderValue::from_static("https://github.com/cjpais/Handy"),
+        HeaderValue::from_static("https://github.com/luweiCN/Handy"),
     );
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static("Handy/1.0 (+https://github.com/cjpais/Handy)"),
+        HeaderValue::from_static("Handy-Fork/1.0 (+https://github.com/luweiCN/Handy)"),
     );
-    headers.insert("X-Title", HeaderValue::from_static("Handy"));
+    headers.insert("X-Title", HeaderValue::from_static("Handy Fork"));
 
     // Provider-specific auth headers
     if !api_key.is_empty() {
@@ -370,6 +417,7 @@ pub async fn send_chat_completion(
     model: &str,
     prompt: String,
     disable_reasoning: bool,
+    hedge_policy: HedgePolicy,
 ) -> Result<Option<String>, String> {
     send_chat_completion_with_schema(
         provider,
@@ -379,6 +427,7 @@ pub async fn send_chat_completion(
         None,
         None,
         disable_reasoning,
+        hedge_policy,
     )
     .await
 }
@@ -397,6 +446,7 @@ pub async fn send_chat_completion(
 /// Remote requests use the hedging policy above. The first non-empty
 /// successful response wins; errors and empty responses leave other attempts
 /// running until one succeeds, every attempt finishes, or the caller cancels.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_chat_completion_with_schema(
     provider: &PostProcessProvider,
     api_key: String,
@@ -405,6 +455,7 @@ pub async fn send_chat_completion_with_schema(
     system_prompt: Option<String>,
     json_schema: Option<Value>,
     disable_reasoning: bool,
+    hedge_policy: HedgePolicy,
 ) -> Result<Option<String>, String> {
     send_chat_completion_with_schema_and_hedge(
         provider,
@@ -414,7 +465,7 @@ pub async fn send_chat_completion_with_schema(
         system_prompt,
         json_schema,
         disable_reasoning,
-        LLM_HEDGE_DELAY,
+        hedge_policy,
     )
     .await
 }
@@ -428,7 +479,7 @@ async fn send_chat_completion_with_schema_and_hedge(
     system_prompt: Option<String>,
     json_schema: Option<Value>,
     disable_reasoning: bool,
-    hedge_delay: Duration,
+    hedge_policy: HedgePolicy,
 ) -> Result<Option<String>, String> {
     let attempt = ChatCompletionAttempt {
         provider: provider.clone(),
@@ -439,7 +490,7 @@ async fn send_chat_completion_with_schema_and_hedge(
         json_schema,
         disable_reasoning,
     };
-    run_hedged_chat_completion(attempt, hedge_delay).await
+    run_hedged_chat_completion(attempt, hedge_policy).await
 }
 
 fn spawn_chat_completion_attempt(
@@ -453,17 +504,18 @@ fn spawn_chat_completion_attempt(
 
 async fn run_hedged_chat_completion(
     attempt: ChatCompletionAttempt,
-    hedge_delay: Duration,
+    hedge_policy: HedgePolicy,
 ) -> Result<Option<String>, String> {
     let started = Instant::now();
     let mut attempts = JoinSet::new();
-    for attempt_id in 1..=LLM_EAGER_ATTEMPTS {
+    let eager_attempts = hedge_policy.eager_attempts();
+    for attempt_id in 1..=eager_attempts {
         spawn_chat_completion_attempt(&mut attempts, attempt_id, attempt.clone());
     }
 
-    let delayed_attempt = tokio::time::sleep(hedge_delay);
+    let delayed_attempt = tokio::time::sleep(hedge_policy.delay());
     tokio::pin!(delayed_attempt);
-    let mut delayed_started = false;
+    let mut delayed_started = !hedge_policy.delayed_request_enabled();
     let mut last_error = None;
 
     loop {
@@ -502,11 +554,17 @@ async fn run_hedged_chat_completion(
             }
             _ = &mut delayed_attempt, if !delayed_started => {
                 delayed_started = true;
+                let delayed_attempt_id = eager_attempts + 1;
                 debug!(
-                    "No successful LLM hedge result after {}ms; starting delayed attempt 3",
-                    hedge_delay.as_millis()
+                    "No successful LLM hedge result after {}ms; starting delayed attempt {}",
+                    hedge_policy.delay().as_millis(),
+                    delayed_attempt_id
                 );
-                spawn_chat_completion_attempt(&mut attempts, 3, attempt.clone());
+                spawn_chat_completion_attempt(
+                    &mut attempts,
+                    delayed_attempt_id,
+                    attempt.clone(),
+                );
             }
         }
     }
@@ -972,8 +1030,11 @@ mod tests {
     }
 
     #[test]
-    fn production_hedge_delay_is_five_seconds() {
-        assert_eq!(LLM_HEDGE_DELAY, std::time::Duration::from_secs(5));
+    fn default_hedge_policy_preserves_current_behavior() {
+        let policy = HedgePolicy::default();
+        assert_eq!(policy.eager_attempts(), 2);
+        assert!(policy.delayed_request_enabled());
+        assert_eq!(policy.delay(), std::time::Duration::from_secs(5));
     }
 
     #[tokio::test]
@@ -989,7 +1050,7 @@ mod tests {
                 None,
                 None,
                 true,
-                std::time::Duration::from_millis(250),
+                HedgePolicy::new(true, true, std::time::Duration::from_millis(250)),
             ),
         )
         .await
@@ -1017,7 +1078,7 @@ mod tests {
             None,
             None,
             false,
-            std::time::Duration::from_millis(100),
+            HedgePolicy::new(true, true, std::time::Duration::from_millis(100)),
         )
         .await
         .unwrap();
@@ -1026,6 +1087,103 @@ mod tests {
         let first = accepted.recv().await.unwrap();
         let second = accepted.recv().await.unwrap();
         assert!(second.duration_since(first) < std::time::Duration::from_millis(40));
+    }
+
+    #[tokio::test]
+    async fn hedge_policy_can_use_one_request_only() {
+        let response = r#"{"choices":[{"message":{"content":"single"}}]}"#;
+        let (base_url, mut accepted) = serve_planned_chat_responses(vec![
+            (std::time::Duration::from_millis(50), "200 OK", response),
+            (std::time::Duration::ZERO, "200 OK", response),
+        ])
+        .await;
+
+        let result = send_chat_completion_with_schema_and_hedge(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            false,
+            HedgePolicy::new(false, false, std::time::Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("single"));
+        accepted.recv().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), accepted.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn hedge_policy_can_disable_only_the_delayed_request() {
+        let slow = r#"{"choices":[{"message":{"content":"slow"}}]}"#;
+        let fast = r#"{"choices":[{"message":{"content":"fast"}}]}"#;
+        let third = r#"{"choices":[{"message":{"content":"third"}}]}"#;
+        let (base_url, mut accepted) = serve_planned_chat_responses(vec![
+            (std::time::Duration::from_millis(100), "200 OK", slow),
+            (std::time::Duration::from_millis(20), "200 OK", fast),
+            (std::time::Duration::ZERO, "200 OK", third),
+        ])
+        .await;
+
+        let result = send_chat_completion_with_schema_and_hedge(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            false,
+            HedgePolicy::new(true, false, std::time::Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("fast"));
+        accepted.recv().await.unwrap();
+        accepted.recv().await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), accepted.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn hedge_policy_can_delay_a_second_request_without_parallel_start() {
+        let slow = r#"{"choices":[{"message":{"content":"slow"}}]}"#;
+        let backup = r#"{"choices":[{"message":{"content":"backup"}}]}"#;
+        let (base_url, mut accepted) = serve_planned_chat_responses(vec![
+            (std::time::Duration::from_millis(100), "200 OK", slow),
+            (std::time::Duration::ZERO, "200 OK", backup),
+        ])
+        .await;
+        let started = tokio::time::Instant::now();
+        let hedge_delay = std::time::Duration::from_millis(30);
+
+        let result = send_chat_completion_with_schema_and_hedge(
+            &provider("custom", &base_url),
+            String::new(),
+            "test-model",
+            "hi".to_string(),
+            None,
+            None,
+            false,
+            HedgePolicy::new(false, true, hedge_delay),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.as_deref(), Some("backup"));
+        accepted.recv().await.unwrap();
+        let backup_started = accepted.recv().await.unwrap();
+        assert!(backup_started.duration_since(started) >= hedge_delay);
     }
 
     #[tokio::test]
@@ -1050,7 +1208,7 @@ mod tests {
             None,
             None,
             false,
-            hedge_delay,
+            HedgePolicy::new(true, true, hedge_delay),
         )
         .await
         .unwrap();
@@ -1083,7 +1241,7 @@ mod tests {
             None,
             None,
             false,
-            hedge_delay,
+            HedgePolicy::new(true, true, hedge_delay),
         )
         .await
         .unwrap();

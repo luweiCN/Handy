@@ -8,7 +8,9 @@ import {
   Dropdown,
   SettingContainer,
   SettingsGroup,
+  Slider,
   Textarea,
+  ToggleSwitch,
 } from "@/components/ui";
 import { Button } from "../../ui/Button";
 import { ResetButton } from "../../ui/ResetButton";
@@ -414,6 +416,71 @@ const PostProcessingSettingsPromptsComponent: React.FC = () => {
   );
 };
 
+const PostProcessingRequestAcceleration: React.FC = () => {
+  const { t } = useTranslation();
+  const { getSetting, updateSetting, isUpdating } = useSettings();
+  const parallelRequestsEnabled =
+    getSetting("post_process_parallel_requests_enabled") ?? true;
+  const delayedRequestEnabled =
+    getSetting("post_process_delayed_request_enabled") ?? true;
+  const delaySeconds = getSetting("post_process_hedge_delay_seconds") ?? 5;
+
+  return (
+    <>
+      <ToggleSwitch
+        checked={parallelRequestsEnabled}
+        onChange={(enabled) =>
+          updateSetting("post_process_parallel_requests_enabled", enabled)
+        }
+        isUpdating={isUpdating("post_process_parallel_requests_enabled")}
+        label={t("settings.postProcessing.requestAcceleration.parallel.title")}
+        description={t(
+          "settings.postProcessing.requestAcceleration.parallel.description",
+        )}
+        descriptionMode="tooltip"
+        grouped
+      />
+      <ToggleSwitch
+        checked={delayedRequestEnabled}
+        onChange={(enabled) =>
+          updateSetting("post_process_delayed_request_enabled", enabled)
+        }
+        isUpdating={isUpdating("post_process_delayed_request_enabled")}
+        label={t("settings.postProcessing.requestAcceleration.delayed.title")}
+        description={t(
+          "settings.postProcessing.requestAcceleration.delayed.description",
+        )}
+        descriptionMode="tooltip"
+        grouped
+      />
+      <Slider
+        value={delaySeconds}
+        onChange={(seconds) =>
+          updateSetting("post_process_hedge_delay_seconds", seconds)
+        }
+        min={1}
+        max={30}
+        step={1}
+        disabled={
+          !delayedRequestEnabled ||
+          isUpdating("post_process_hedge_delay_seconds")
+        }
+        label={t("settings.postProcessing.requestAcceleration.delay.title")}
+        description={t(
+          "settings.postProcessing.requestAcceleration.delay.description",
+        )}
+        descriptionMode="tooltip"
+        grouped
+        formatValue={(seconds) =>
+          t("settings.postProcessing.requestAcceleration.delay.seconds", {
+            count: seconds,
+          })
+        }
+      />
+    </>
+  );
+};
+
 export const PostProcessingSettingsApi = React.memo(
   PostProcessingSettingsApiComponent,
 );
@@ -439,6 +506,12 @@ export const PostProcessingSettings: React.FC = () => {
 
       <SettingsGroup title={t("settings.postProcessing.api.title")}>
         <PostProcessingSettingsApi />
+      </SettingsGroup>
+
+      <SettingsGroup
+        title={t("settings.postProcessing.requestAcceleration.title")}
+      >
+        <PostProcessingRequestAcceleration />
       </SettingsGroup>
 
       <SettingsGroup title={t("settings.postProcessing.prompts.title")}>

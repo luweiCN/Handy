@@ -391,6 +391,22 @@
       }
     },
     "postProcessing": {
+      "requestAcceleration": {
+        "title": "请求加速",
+        "parallel": {
+          "title": "并发请求",
+          "description": "开启后，每次远程后处理会同时发送 2 个请求，并采用最先返回的有效结果。"
+        },
+        "delayed": {
+          "title": "延迟备用请求",
+          "description": "如果仍未收到有效结果，则在设定延迟后再发送 1 个远程请求。"
+        },
+        "delay": {
+          "title": "备用请求延迟",
+          "description": "发送额外远程请求前等待的时间。",
+          "seconds": "{{count}} 秒"
+        }
+      },
       "hotkey": {
         "title": "快捷键"
       },

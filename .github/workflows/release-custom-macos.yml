@@ -41,6 +41,10 @@ jobs:
           tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
           package_version="$(jq -r '.version' package.json)"
           cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -1)"
+          product_name="$(jq -r '.productName' src-tauri/tauri.conf.json)"
+          identifier="$(jq -r '.identifier' src-tauri/tauri.conf.json)"
+          updater_endpoint="$(jq -r '.plugins.updater.endpoints | if length == 1 then .[0] else empty end' src-tauri/tauri.conf.json)"
+          updater_pubkey_sha256="$(jq -r '.plugins.updater.pubkey' src-tauri/tauri.conf.json | sha256sum | cut -d' ' -f1)"
 
           if [[ "$tauri_version" != "$package_version" || "$tauri_version" != "$cargo_version" ]]; then
             echo "Version mismatch: tauri=$tauri_version package=$package_version cargo=$cargo_version" >&2
@@ -49,6 +53,21 @@ jobs:
 
           if [[ ! "$tauri_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$ ]]; then
             echo "Custom release version must match X.Y.Z-fork.N" >&2
+            exit 1
+          fi
+
+          if [[ "$product_name" != "Handy Fork" || "$identifier" != "com.luweicn.handyfork" ]]; then
+            echo "Custom release identity mismatch: productName=$product_name identifier=$identifier" >&2
+            exit 1
+          fi
+
+          if [[ "$updater_endpoint" != "https://github.com/luweiCN/Handy/releases/latest/download/latest.json" ]]; then
+            echo "Custom updater endpoint mismatch: $updater_endpoint" >&2
+            exit 1
+          fi
+
+          if [[ "$updater_pubkey_sha256" != "47abd89a84b48180c1606ee7937a1072499cef839efde7694c7a866493ecfd89" ]]; then
+            echo "Custom updater public key mismatch" >&2
             exit 1
           fi
 

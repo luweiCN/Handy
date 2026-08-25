@@ -368,6 +368,22 @@
       }
     },
     "postProcessing": {
+      "requestAcceleration": {
+        "title": "Request Acceleration",
+        "parallel": {
+          "title": "Parallel Requests",
+          "description": "Send two remote post-processing requests at once and use the first valid response."
+        },
+        "delayed": {
+          "title": "Delayed Backup Request",
+          "description": "If no valid response has arrived, send one additional remote request after the configured delay."
+        },
+        "delay": {
+          "title": "Backup Request Delay",
+          "description": "How long to wait before sending the additional remote request.",
+          "seconds": "{{count}}s"
+        }
+      },
       "hotkey": {
         "title": "مفتاح الاختصار"
       },

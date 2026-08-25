@@ -2,6 +2,7 @@
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error, VadPolicy};
+use crate::llm_client::HedgePolicy;
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::model::ModelManager;
@@ -192,6 +193,11 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     // benefits from it and it adds seconds of latency. llm_client picks the
     // field the endpoint understands and retries without it if rejected.
     let disable_reasoning = matches!(provider.id.as_str(), "custom" | "openrouter");
+    let hedge_policy = HedgePolicy::new(
+        settings.post_process_parallel_requests_enabled,
+        settings.post_process_delayed_request_enabled,
+        Duration::from_secs(settings.effective_post_process_hedge_delay_seconds()),
+    );
 
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
@@ -264,6 +270,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
             Some(system_prompt),
             Some(json_schema),
             disable_reasoning,
+            hedge_policy,
         )
         .await
         {
@@ -320,6 +327,7 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         &model,
         processed_prompt,
         disable_reasoning,
+        hedge_policy,
     )
     .await
     {

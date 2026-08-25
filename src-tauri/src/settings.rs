@@ -423,6 +423,12 @@ pub struct AppSettings {
     pub auto_submit_key: AutoSubmitKey,
     #[serde(default = "default_post_process_enabled")]
     pub post_process_enabled: bool,
+    #[serde(default = "default_post_process_parallel_requests_enabled")]
+    pub post_process_parallel_requests_enabled: bool,
+    #[serde(default = "default_post_process_delayed_request_enabled")]
+    pub post_process_delayed_request_enabled: bool,
+    #[serde(default = "default_post_process_hedge_delay_seconds")]
+    pub post_process_hedge_delay_seconds: u64,
     #[serde(default = "default_post_process_provider_id")]
     pub post_process_provider_id: String,
     #[serde(default = "default_post_process_providers")]
@@ -609,6 +615,35 @@ fn default_theme() -> Theme {
 
 fn default_post_process_enabled() -> bool {
     false
+}
+
+fn default_post_process_parallel_requests_enabled() -> bool {
+    true
+}
+
+fn default_post_process_delayed_request_enabled() -> bool {
+    true
+}
+
+pub(crate) const MIN_POST_PROCESS_HEDGE_DELAY_SECONDS: u64 = 1;
+pub(crate) const MAX_POST_PROCESS_HEDGE_DELAY_SECONDS: u64 = 30;
+pub(crate) const DEFAULT_POST_PROCESS_HEDGE_DELAY_SECONDS: u64 = 5;
+
+fn default_post_process_hedge_delay_seconds() -> u64 {
+    DEFAULT_POST_PROCESS_HEDGE_DELAY_SECONDS
+}
+
+pub(crate) fn validate_post_process_hedge_delay_seconds(seconds: u64) -> Result<(), String> {
+    if (MIN_POST_PROCESS_HEDGE_DELAY_SECONDS..=MAX_POST_PROCESS_HEDGE_DELAY_SECONDS)
+        .contains(&seconds)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Post-processing hedge delay must be between {} and {} seconds",
+            MIN_POST_PROCESS_HEDGE_DELAY_SECONDS, MAX_POST_PROCESS_HEDGE_DELAY_SECONDS
+        ))
+    }
 }
 
 fn default_app_language() -> String {
@@ -919,6 +954,9 @@ pub fn get_default_settings() -> AppSettings {
         auto_submit: default_auto_submit(),
         auto_submit_key: AutoSubmitKey::default(),
         post_process_enabled: default_post_process_enabled(),
+        post_process_parallel_requests_enabled: default_post_process_parallel_requests_enabled(),
+        post_process_delayed_request_enabled: default_post_process_delayed_request_enabled(),
+        post_process_hedge_delay_seconds: default_post_process_hedge_delay_seconds(),
         post_process_provider_id: default_post_process_provider_id(),
         post_process_providers: default_post_process_providers(),
         post_process_api_keys: default_post_process_api_keys(),
@@ -957,6 +995,13 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub(crate) fn effective_post_process_hedge_delay_seconds(&self) -> u64 {
+        self.post_process_hedge_delay_seconds.clamp(
+            MIN_POST_PROCESS_HEDGE_DELAY_SECONDS,
+            MAX_POST_PROCESS_HEDGE_DELAY_SECONDS,
+        )
+    }
+
     pub fn active_post_process_provider(&self) -> Option<&PostProcessProvider> {
         self.post_process_providers
             .iter()
@@ -1200,6 +1245,9 @@ mod tests {
         assert!(settings.push_to_talk);
         assert!(!settings.audio_feedback);
         assert!(settings.filler_word_removal_enabled);
+        assert!(settings.post_process_parallel_requests_enabled);
+        assert!(settings.post_process_delayed_request_enabled);
+        assert_eq!(settings.post_process_hedge_delay_seconds, 5);
         // Bindings default to empty; the load path merges the real defaults in.
         assert!(settings.bindings.is_empty());
     }
@@ -1435,10 +1483,28 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+        assert!(settings.post_process_parallel_requests_enabled);
+        assert!(settings.post_process_delayed_request_enabled);
+        assert_eq!(settings.post_process_hedge_delay_seconds, 5);
         assert_eq!(
             settings.settings_schema_version,
             CURRENT_SETTINGS_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn post_process_hedge_delay_accepts_only_ui_range() {
+        assert!(validate_post_process_hedge_delay_seconds(1).is_ok());
+        assert!(validate_post_process_hedge_delay_seconds(5).is_ok());
+        assert!(validate_post_process_hedge_delay_seconds(30).is_ok());
+        assert!(validate_post_process_hedge_delay_seconds(0).is_err());
+        assert!(validate_post_process_hedge_delay_seconds(31).is_err());
+
+        let mut settings = get_default_settings();
+        settings.post_process_hedge_delay_seconds = 0;
+        assert_eq!(settings.effective_post_process_hedge_delay_seconds(), 1);
+        settings.post_process_hedge_delay_seconds = 31;
+        assert_eq!(settings.effective_post_process_hedge_delay_seconds(), 30);
     }
 
     #[cfg(not(target_os = "linux"))]

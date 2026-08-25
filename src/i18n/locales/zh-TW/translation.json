@@ -391,6 +391,22 @@
       }
     },
     "postProcessing": {
+      "requestAcceleration": {
+        "title": "請求加速",
+        "parallel": {
+          "title": "並行請求",
+          "description": "開啟後，每次遠端後處理會同時傳送 2 個請求，並採用最先回傳的有效結果。"
+        },
+        "delayed": {
+          "title": "延遲備用請求",
+          "description": "如果仍未收到有效結果，則在設定的延遲後再傳送 1 個遠端請求。"
+        },
+        "delay": {
+          "title": "備用請求延遲",
+          "description": "傳送額外遠端請求前等待的時間。",
+          "seconds": "{{count}} 秒"
+        }
+      },
       "hotkey": {
         "title": "快捷鍵"
       },
